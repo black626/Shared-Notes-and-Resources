@@ -1,3 +1,9 @@
+Legacy version available here: https://github.com/ParrotSec/mimikatz
+	Use if newer version isn't working on older systems.
+Otherwise, use mimikatz.exe included in kali:
+	/usr/share/windows-resources/mimikatz/Win32/mimikatz.exe
+	/usr/share/windows-resources/mimikatz/x64/mimikatz.exe
+
 spawn privileged shell:
 	powershell.exe Start-Process cmd.exe -Verb runAs
 
